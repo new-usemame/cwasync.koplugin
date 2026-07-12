@@ -9,7 +9,11 @@
 3. Restart KOReader.
 4. Open **Tools → NextGen Progress Sync → Login to NextGen Server** and enter the server URL and credentials.
 
-Existing installations can use KOReader's Updates Manager with this repository. Release tags and the plugin version use the same semantic version (for example, tag `v4.1.11` contains plugin version `4.1.11`). A release appears here only when the plugin itself changes.
+Existing installations can use KOReader's Updates Manager or appstore.koplugin with this repository URL:
+
+`https://github.com/new-usemame/cwasync.koplugin`
+
+Release tags and the plugin version use the same semantic version (for example, tag `v4.1.11` contains plugin version `4.1.11`). A release appears here only when the plugin itself changes.
 
 ## Source and releases
 
