@@ -229,7 +229,20 @@ function CWASyncClient:pull_annotations(username, password, document, callback)
 end
 
 -- Phase 2: push annotations for a document (device -> server).
-function CWASyncClient:push_annotations(username, password, document, annotations, callback)
+--
+-- ``complete`` marks this as the device's whole live set for the document, which
+-- is what lets the server observe deletions: KOReader keeps no tombstone when a
+-- highlight is removed, so a delete reaches us only as an omission (#905). Only
+-- pass it when the full set was actually read — the server reaps what's absent.
+-- `deleted` is the list of annotation_ids this device used to have and the user
+-- has since removed. The server never infers a deletion from an omission (#920),
+-- so anything not named here is left alone.
+--
+-- Every key sent must be listed in api.json's `payload` for push_annotations:
+-- lua-Spore rebuilds the request body from exactly that list and silently drops
+-- everything else (Spore.lua:137-141), which is how #906's `complete` flag was
+-- thrown away before it ever reached the wire.
+function CWASyncClient:push_annotations(username, password, document, annotations, deleted, callback)
     self.client:reset_middlewares()
     self.client:enable("Format.JSON")
     self.client:enable("GinClient")
@@ -243,6 +256,8 @@ function CWASyncClient:push_annotations(username, password, document, annotation
             return self.client:push_annotations({
                 document = document,
                 annotations = annotations,
+                deleted = (deleted and #deleted > 0) and deleted or nil,
+                delete_source = (deleted and #deleted > 0) and "koreader" or nil,
             })
         end)
         if ok then
