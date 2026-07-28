@@ -6,6 +6,50 @@ function SyncLogic.isRemoteProgressFromThisDevice(body, device_model, device_id)
         and body.device_id == device_id
 end
 
+-- The digest the server matches a sync against is a partial MD5 of the book's
+-- *bytes* — the server computes the same 12 x 1 KiB sample in
+-- cps/progress_syncing/checksums/koreader.py. KOReader caches that value in the
+-- per-document sidecar as `partial_md5_checksum`, and the sidecar is keyed by
+-- file PATH, so it outlives the file at that path being replaced.
+--
+-- Trusting the cache therefore breaks sync permanently as soon as the server's
+-- copy of a book changes and the reader re-downloads over the old file: the
+-- device keeps reporting the digest of bytes it no longer holds, while the
+-- server only ever registers the digest of the bytes it actually served. The
+-- two can never meet, and re-downloading makes it worse rather than better --
+-- every download registers one more digest the device will never compute. That
+-- is #991, where the reporter re-downloaded over OPDS and kept getting
+-- "No book found for checksum".
+--
+-- So the bytes on disk are the authority. The cache is kept only as a fallback
+-- for when recomputing is impossible (file missing, unreadable, detached SD
+-- card): there a stale digest still beats no digest, because progress already
+-- stored under it can still round-trip.
+--
+-- Recomputing is not free: it is one open plus 12 seek/read pairs of 1 KiB per
+-- call, and bulk library pull does this once per book. That cost has not been
+-- measured on e-reader storage. It is accepted rather than optimised because
+-- there is no sound way to decide the cache is fresh -- KOReader rewrites the
+-- sidecar on ordinary progress saves without recomputing the digest, so neither
+-- the sidecar's mtime nor its presence tells you whether the file underneath it
+-- changed. Note the path this replaced was not free either: it opened and
+-- parsed each book's sidecar, and in bulk pull every book is followed by an
+-- HTTP round trip that dominates either cost.
+function SyncLogic.resolveDocumentDigest(computeFromFile, readCachedDigest)
+    local function call(source)
+        if type(source) ~= "function" then
+            return nil
+        end
+        local ok, digest = pcall(source)
+        if ok and type(digest) == "string" and digest ~= "" then
+            return digest
+        end
+        return nil
+    end
+
+    return call(computeFromFile) or call(readCachedDigest)
+end
+
 function SyncLogic.didBookProgressChange(previous, new_values)
     return previous.percent_finished ~= new_values.percent_finished
         or previous.last_page ~= new_values.last_page

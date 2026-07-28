@@ -27,7 +27,7 @@ end
 local CWASync = WidgetContainer:extend{
     name = "cwasync",
     title = _("Login to NextGen Server"),
-    version = "4.1.16",  -- Plugin version mirrors CWNG release tag; keep in lockstep with _meta.lua
+    version = "4.1.23",  -- Plugin version mirrors CWNG release tag; keep in lockstep with _meta.lua
 
     push_timestamp = nil,
     pull_timestamp = nil,
@@ -596,73 +596,103 @@ function CWASync:getCurrentDocumentFile()
     return nil
 end
 
+-- Resolve the digest the server keys this book's progress on. Precedence lives
+-- in SyncLogic.resolveDocumentDigest: the bytes on disk win, KOReader's cached
+-- sidecar value is only a fallback. See the comment there for why (#991).
 function CWASync:getDocumentDigest(file_path)
-    local digest = nil
-    if not file_path and self.ui and self.ui.doc_settings and self.ui.doc_settings.readSetting then
-        digest = self.ui.doc_settings:readSetting("partial_md5_checksum")
-    elseif file_path then
-        local ok, DocSettings = pcall(require, "docsettings")
-        if ok and DocSettings then
-            local ok_open, doc_settings = pcall(DocSettings.open, DocSettings, file_path)
-            if ok_open and doc_settings and doc_settings.readSetting then
-                digest = doc_settings:readSetting("partial_md5_checksum")
-            end
-        end
-    end
-
-    if digest and digest ~= "" then
-        return digest
-    end
-
+    -- When called without a path we are on the open document, whose settings are
+    -- already loaded; with a path we have to open that document's sidecar.
+    local settings_path = file_path
     if not file_path then
         file_path = self:getCurrentDocumentFile()
     end
 
-    if util.partialMD5 and file_path then
-        local ok, result = pcall(util.partialMD5, file_path)
-        if ok and result and result ~= "" then
-            return result
+    local function computeFromFile()
+        if not file_path then
+            return nil
         end
-    end
 
-    if file_path then
+        if util.partialMD5 then
+            local ok, result = pcall(util.partialMD5, file_path)
+            if ok and result and result ~= "" then
+                return result
+            end
+        end
+
         local ok, result = pcall(function(path)
             local f = io.open(path, "rb")
             if not f then
                 return nil
             end
 
-            local step = 1024
-            local sample_size = 1024
-            local chunks = {}
-            for i = -1, 10 do
-                local position = bit.lshift(step, 2 * i)
-                local ok_seek = f:seek("set", position)
-                if not ok_seek then
-                    break
+            -- The handle is closed on every exit, not just the clean one. A
+            -- detached SD card makes seek/read throw mid-loop, and bulk library
+            -- pull runs this once per book, so a success-only close leaks one
+            -- descriptor per book until the device runs out.
+            local ok_hash, hashed = pcall(function()
+                local step = 1024
+                local sample_size = 1024
+                local chunks = {}
+                for i = -1, 10 do
+                    local position = bit.lshift(step, 2 * i)
+                    local ok_seek = f:seek("set", position)
+                    if not ok_seek then
+                        break
+                    end
+
+                    local sample = f:read(sample_size)
+                    if not sample or #sample == 0 then
+                        break
+                    end
+                    chunks[#chunks + 1] = sample
                 end
 
-                local sample = f:read(sample_size)
-                if not sample or #sample == 0 then
-                    break
-                end
-                chunks[#chunks + 1] = sample
-            end
-            f:close()
+                -- Hash whatever was sampled, including nothing. The server's
+                -- calculate_koreader_partial_md5 breaks out of this same loop
+                -- and returns md5("") for a zero-byte file rather than None
+                -- (cps/progress_syncing/checksums/koreader.py), so returning
+                -- nil here would drop us onto the stale sidecar and reproduce
+                -- #991 for exactly the file the server can still resolve.
+                return md5(table.concat(chunks))
+            end)
 
-            if #chunks == 0 then
-                return nil
-            end
+            pcall(f.close, f)
 
-            return md5(table.concat(chunks))
+            if ok_hash then
+                return hashed
+            end
+            return nil
         end, file_path)
 
         if ok and result and result ~= "" then
             return result
         end
+
+        return nil
     end
 
-    return nil
+    local function readCachedDigest()
+        if not settings_path then
+            if self.ui and self.ui.doc_settings and self.ui.doc_settings.readSetting then
+                return self.ui.doc_settings:readSetting("partial_md5_checksum")
+            end
+            return nil
+        end
+
+        local ok, DocSettings = pcall(require, "docsettings")
+        if not (ok and DocSettings) then
+            return nil
+        end
+
+        local ok_open, doc_settings = pcall(DocSettings.open, DocSettings, settings_path)
+        if ok_open and doc_settings and doc_settings.readSetting then
+            return doc_settings:readSetting("partial_md5_checksum")
+        end
+
+        return nil
+    end
+
+    return SyncLogic.resolveDocumentDigest(computeFromFile, readCachedDigest)
 end
 
 function CWASync:getLibraryBookPaths()
