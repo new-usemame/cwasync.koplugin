@@ -126,6 +126,62 @@ function SyncLogic.computeDeletions(watermark, localList)
     return deleted
 end
 
+-- Read the device's live annotation set, and say whether it is actually known.
+--
+-- This is the guard `computeDeletions` above demands, and it lives here rather
+-- than at the call site because the two must agree: the caller passes the list
+-- to both, and only this function can tell "the user has no highlights" from
+-- "this device could not be asked". Deriving that from a provider's static
+-- capability flag instead — `push_all_local`, which is a constant — makes every
+-- failed read indistinguishable from a full delete, which is #920 from the
+-- device's side of the wire.
+--
+-- Returns `list, known`. `known` is false when the set could not be read, and
+-- `list` is then an empty table so callers can still diff safely; they must not
+-- derive deletions from it. A provider that throws is treated as unreadable, not
+-- as empty — a raise is the least trustworthy answer of all.
+function SyncLogic.resolveLocalSet(provider, volume_id)
+    if type(provider) ~= "table" or type(provider.readAll) ~= "function" then
+        return {}, false
+    end
+    -- The Kobo provider addresses rows by VolumeID, so without one it cannot
+    -- read the device at all. `push_all_local` providers enumerate the open
+    -- document instead and need no volume.
+    if not (provider.push_all_local or volume_id) then
+        return {}, false
+    end
+    local ok, list = pcall(provider.readAll, volume_id)
+    if not ok or type(list) ~= "table" then
+        return {}, false
+    end
+    return list, true
+end
+
+-- Everything the push needs to know about this device's own set, decided here
+-- rather than at the call site.
+--
+-- The call site is a callback inside a 1600-line file that no test can reach,
+-- so any authority logic written there is unexecutable by construction — and
+-- the bug this replaces lived there for exactly that reason. Returning the
+-- decision as data means the whole path, provider read through to "which ids do
+-- we tell the server to delete", runs in the test suite.
+--
+--   list      -- the device's live annotations, {} when they could not be read
+--   known     -- whether that list is a genuine read (see resolveLocalSet)
+--   deletions -- ids to name to the server; ALWAYS empty on an unknown read
+--   may_save_watermark -- whether `list` is fit to become the new watermark;
+--                         saving a placeholder would make the next sync believe
+--                         the device had nothing to begin with
+function SyncLogic.planLocalContribution(provider, volume_id, watermark)
+    local list, known = SyncLogic.resolveLocalSet(provider, volume_id)
+    return {
+        list = list,
+        known = known,
+        deletions = known and SyncLogic.computeDeletions(watermark, list) or {},
+        may_save_watermark = known,
+    }
+end
+
 function SyncLogic.diffAnnotations(localList, remoteList)
     local function byId(list)
         local m = {}
